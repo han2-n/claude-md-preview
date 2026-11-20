@@ -1,63 +1,95 @@
 # md-preview
 
-Plugin cho Claude Code giúp đọc Markdown dễ hơn, nhất là bảng:
+**English** · [Tiếng Việt](README.vi.md)
 
-- **Bảng trong câu trả lời của Claude** được vẽ lại thành lưới: cột thẳng hàng, ô dài xuống dòng theo từ,
-  bảng rộng thì kéo ngang để xem hết. Dưới bảng có nút mở bảng trong pane cho rộng hơn, và nút quay về kiểu bảng
-  gốc của Claude. Áp dụng trên app desktop và mobile; terminal và VS Code giữ cách vẽ của Claude.
-- **Pane MD Preview** (lệnh `/md`): danh sách mọi file `.md` Claude đã ghi, ở mọi session, mới nhất ở trên, có ô tìm
-  kiếm. Bấm một file để xem: chữ vẽ như câu trả lời của Claude, bảng vẽ thành lưới cuộn ngang.
-- **Bảng trong pane**: bấm tên cột để sắp xếp (tăng → giảm → bỏ), cột số như `5 516`, `1,263`, `39.7k` sắp theo
-  giá trị. Ô giữ chữ đậm, `code`, gạch ngang; link trong bảng được liệt kê bấm được ngay dưới bảng. Dòng chẵn tô
-  nền nhạt cho dễ dò theo hàng.
-- **Tự mở**: khi Claude vừa ghi hoặc sửa một file `.md`, pane hiện ngay file đó. File trong thư mục `.claude`
-  (memory, plan nội bộ) được bỏ qua.
-- **Chấm "chưa xem"**: file Claude sửa mà bạn chưa mở có dấu ● trong danh sách; nút "Đánh dấu đã xem hết" xoá mọi
-  chấm.
+A Claude Code plugin that makes Markdown easier to read, especially tables.
 
-`/md đường-dẫn\tới\file.md` mở thẳng một file bất kỳ.
+- **Tables in Claude's replies** are redrawn as a grid. Columns line up, long cells wrap at word boundaries, and you
+  scroll a wide table sideways to see all of it. Under each table there are two buttons: one opens the table in the
+  pane where it has more room, the other switches back to Claude's own table style. This applies in the desktop and
+  mobile apps. In the terminal and VS Code, Claude draws tables as usual.
+- **MD Preview pane** (`/md` command): a list of every `.md` file Claude has written, across all sessions, newest
+  first, with a search box. Click a file to open it. Text is drawn the way Claude's replies are, and tables are drawn
+  as grids you can scroll sideways.
+- **Tables in the pane**:
+  - Click a column name to sort by it. Each click cycles through ascending, descending and unsorted.
+  - Numeric columns sort by value, including formats such as `5 516`, `1,263` and `39.7k`.
+  - Cells keep bold, `code` and strikethrough.
+  - Links in a table are listed, clickable, under it.
+  - Every other row is shaded so you can follow it across.
+- **Auto-open**: when Claude writes or edits a `.md` file, the pane shows it straight away. Files inside a `.claude`
+  folder (memory, internal plans) are skipped.
+- **Unread dot**: a file Claude changed that you haven't opened yet has a ● in the list. "Đánh dấu đã xem hết"
+  ("mark all as read") clears every dot.
 
-## Cài đặt
+`/md path\to\file.md` opens any file directly.
 
-Ở dấu nhắc của một session Claude Code trong terminal:
+The plugin's interface is in Vietnamese.
+
+## Requirements
+
+- Claude Code with plugin support. Grids and the pane work best in the Claude desktop app.
+- Windows. The document list lives under `%USERPROFILE%`.
+
+## Install
+
+At the prompt of a Claude Code session in a terminal:
 
 ```
 /plugin install md-preview --marketplace han2-n/claude-md-preview
 ```
 
-trả lời `y` để thêm marketplace, rồi chọn phạm vi `user` (Enter) để plugin chạy ở mọi session.
+Answer `y` to add the marketplace, then press Enter to pick the `user` scope so the plugin runs in every session.
 
-Từ shell:
+From a shell:
 
 ```
 claude plugin install md-preview --marketplace han2-n/claude-md-preview
 ```
 
-Trong app Claude desktop (nơi `/plugin` không chạy): bấm dấu + cạnh ô nhập, chọn Plugins, Add marketplace với
-`han2-n/claude-md-preview`, rồi Add plugin.
+In the Claude desktop app, where `/plugin` does not run: click + next to the prompt box, choose Plugins, then Add
+marketplace with `han2-n/claude-md-preview`, then Add plugin.
 
-Session đang mở: gõ `/reload-plugins` để nạp. Session mới tự có.
+Sessions that are already open: run `/reload-plugins`. New sessions pick it up on their own.
 
-### Cài từ thư mục (để sửa plugin)
+### Install from a folder (to hack on the plugin)
 
-Clone repo về một chỗ cố định, rồi:
+Clone the repository somewhere permanent, then:
 
 ```
-claude plugin marketplace add "<thư mục đã clone>"
+claude plugin marketplace add "<cloned folder>"
 claude plugin install md-preview@md-preview
 ```
 
-Plugin cài kiểu này được đọc thẳng từ thư mục: sửa file trong đó rồi `/reload-plugins` là có bản mới.
+A plugin installed this way is read straight from that folder. Edit its files, then run `/reload-plugins` to load
+the new version.
 
-## Dữ liệu
+## Update
 
-Danh sách tài liệu nằm ở `%USERPROFILE%\.md-preview\index.tsv` (hoặc `$HOME/.md-preview/index.tsv`): mỗi dòng
-một file `.md` với đường dẫn, thời điểm Claude ghi, số bảng và thư mục dự án. Plugin không chép nội dung file,
-không gửi gì ra ngoài máy.
+```
+claude plugin update md-preview@md-preview
+```
 
-## Gỡ
+Then run `/reload-plugins` in open sessions.
+
+## Data
+
+Everything stays on your machine, in `%USERPROFILE%\.md-preview\`. The plugin never copies file contents and sends
+nothing anywhere.
+
+- `index.tsv`: one line per `.md` file Claude wrote, with its path, when it was written, how many tables it has and
+  the project folder.
+- `seen.tsv`: when you last opened each file, used for the unread dots.
+
+## Uninstall
 
 ```
 claude plugin uninstall md-preview@md-preview
 claude plugin marketplace remove md-preview
 ```
+
+Delete `%USERPROFILE%\.md-preview\` too if you want to remove the document list.
+
+## License
+
+MIT

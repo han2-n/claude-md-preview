@@ -1,7 +1,7 @@
 {
   "name": "md-preview",
   "version": "0.4.0",
-  "description": "Readable Markdown in Claude Code: tables in Claude's replies drawn as scrollable, sortable grids, plus a /md pane listing every .md file Claude has written",
+  "description": "Readable Markdown in Claude Code: tables in Claude's replies drawn as scrollable grids, plus a /md pane that lists every .md file Claude has written, with sortable tables",
   "types": "./types/index.d.ts",
   "license": "MIT"
 }

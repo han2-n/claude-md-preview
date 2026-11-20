@@ -19,9 +19,6 @@ Plugin cho Claude Code giúp đọc Markdown dễ hơn, nhất là bảng:
 
 ## Cài đặt
 
-Repository này là private: bạn cần được mời vào repo trên GitHub, và máy bạn cần có sẵn thông tin đăng nhập GitHub
-cho git (SSH key, hoặc `gh auth login` rồi `gh auth setup-git`). Lệnh cài không tự hỏi đăng nhập.
-
 Ở dấu nhắc của một session Claude Code trong terminal:
 
 ```

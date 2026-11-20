@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { ElementTable, Hook, Register } from 'claude-code'
+import type { ElementTable, Hook, Register, RenderChildren } from 'claude-code'
 
 import type { TableStyle } from '../types'
 
@@ -19,6 +19,10 @@ const query = atom({ plugin: 'md-preview', key: 'query' } as const, '')
 const tableStyle = atom({ plugin: 'md-preview', key: 'tableStyle' } as const, 'grid')
 const chatText = atom({ plugin: 'md-preview', key: 'chatText' } as const, '')
 const isChatGrid = atom({ plugin: 'md-preview', key: 'isChatGrid' } as const, true)
+/** Cột đang sắp xếp của từng bảng trong pane, khoá `<đường dẫn>#<số bảng>`. */
+const sorts = atom({ plugin: 'md-preview', key: 'sorts' } as const, {})
+/** Tăng mỗi lần index.tsv hay seen.tsv đổi, để danh sách (đọc nó khi vẽ) vẽ lại. */
+const listTick = atom({ plugin: 'md-preview', key: 'listTick' } as const, 0)
 
 /** `openPath` mang dấu này khi pane đang xem bảng của một câu trả lời, không phải file. */
 const CHAT = '::chat::'
@@ -80,6 +84,65 @@ async function recordDoc($: Dollar, source: string, root: string, tables: number
   const line = [key, source, '', String(nowSec), String(tables), root].join('\t')
   const text = [...kept, line].join('\n') + '\n'
   await $.fs.write(indexPath, text)
+  await update($, listTick, n => n + 1)
+}
+
+// ---------- Đã xem: ~/.md-preview/seen.tsv ----------
+// Dòng đầu `#since<TAB>giây`: tài liệu cũ hơn mốc này coi như đã xem (để danh sách cũ không chấm hết).
+// Mỗi dòng sau: `đường dẫn viết thường<TAB>giây lần cuối mở xem`.
+
+type Seen = { since: number; at: Map<string, number> }
+
+async function loadSeen($: Dollar): Promise<Seen> {
+  const dir = await storeDir($)
+  const text = dir === undefined ? '' : await $.fs.read(`${dir}\\seen.tsv`).catch(() => '')
+  const seen: Seen = { since: 0, at: new Map() }
+  for (const line of text.split(/\r?\n/)) {
+    const [key, value] = line.split('\t')
+    if (key === undefined || value === undefined) continue
+    if (key === '#since') seen.since = Number(value) || 0
+    else seen.at.set(key, Number(value) || 0)
+  }
+  return seen
+}
+
+async function saveSeen($: Dollar, seen: Seen): Promise<void> {
+  const dir = await storeDir($)
+  if (dir === undefined) return
+  const lines = [`#since\t${seen.since}`, ...[...seen.at].map(([k, v]) => `${k}\t${v}`)]
+  await $.fs.write(`${dir}\\seen.tsv`, lines.join('\n') + '\n')
+  // Danh sách đọc biến đếm này khi vẽ: tăng nó là danh sách vẽ lại.
+  await update($, listTick, n => n + 1)
+}
+
+/** Ghi mốc "đã xem" lần đầu chạy, để chỉ những tài liệu sửa sau đó mới hiện chấm. */
+async function ensureSeen($: Dollar): Promise<void> {
+  const seen = await loadSeen($)
+  if (seen.since > 0) return
+  seen.since = Math.floor((await $.clock.now()) / 1000)
+  await saveSeen($, seen)
+}
+
+async function markSeen($: Dollar, path: string): Promise<void> {
+  const seen = await loadSeen($)
+  seen.at.set(path.toLowerCase(), Math.floor((await $.clock.now()) / 1000))
+  await saveSeen($, seen)
+}
+
+async function markAllSeen($: Dollar): Promise<void> {
+  const nowSec = Math.floor((await $.clock.now()) / 1000)
+  await saveSeen($, { since: nowSec, at: new Map() })
+}
+
+function isUnread(doc: Doc, seen: Seen): boolean {
+  const viewedAt = seen.at.get(doc.source.toLowerCase()) ?? seen.since
+  return doc.updated > viewedAt
+}
+
+/** Mở một tài liệu trong pane và đánh dấu đã xem. */
+async function openDoc($: Dollar, path: string): Promise<void> {
+  await update($, openPath, () => path)
+  await markSeen($, path)
 }
 
 function baseName(path: string): string {
@@ -93,8 +156,10 @@ function projectName(doc: Doc): string {
 
 /** Thư mục chứa file, tính từ gốc dự án. */
 function folderInProject(doc: Doc): string {
+  // Claude có khi viết `D:/a/b`, có khi `D:\a\b`: so sánh sau khi đưa về cùng một kiểu.
+  const norm = (p: string) => p.replace(/\//g, '\\').toLowerCase()
   const root = doc.root.replace(/[\\/]+$/, '')
-  const isInside = doc.source.toLowerCase().startsWith(root.toLowerCase() + '\\')
+  const isInside = norm(doc.source).startsWith(norm(root) + '\\')
   const rel = isInside ? doc.source.slice(root.length + 1) : doc.source
   const cut = Math.max(rel.lastIndexOf('\\'), rel.lastIndexOf('/'))
   return cut < 0 ? '' : rel.slice(0, cut)
@@ -111,10 +176,15 @@ function relativeTime(nowMs: number, updatedSec: number): string {
 // ---------- Tách Markdown thành đoạn chữ và bảng ----------
 
 type Align = 'left' | 'right' | 'center'
-type Table = { header: string[]; aligns: Align[]; rows: string[][] }
+/** Một đoạn chữ trong ô, kèm định dạng inline của nó. */
+type Span = { text: string; bold?: true; code?: true; strike?: true; link?: string }
+/** Một ô: Markdown gốc (để vẽ lại kiểu Claude), chữ trơn (để đo và sắp xếp), các đoạn có định dạng. */
+type Cell = { raw: string; plain: string; spans: Span[] }
+type Table = { header: Cell[]; aligns: Align[]; rows: Cell[][] }
 type Segment = { kind: 'text'; text: string } | { kind: 'table'; table: Table }
 
 const FENCE = /^\s*(```|~~~)/
+const EMPTY_CELL: Cell = { raw: '', plain: '', spans: [] }
 
 function isSeparator(line: string): boolean {
   const t = line.trim()
@@ -155,13 +225,26 @@ function alignOf(spec: string): Align {
   return 'left'
 }
 
-/** Bỏ ký hiệu inline để ô bảng đọc như chữ thường. */
-function plain(cell: string): string {
-  return cell
-    .replace(/<br\s*\/?>/gi, ' ')
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/(\*\*|__|~~)/g, '')
-    .replace(/`/g, '')
+/** `code`, **đậm**, __đậm__, ~~gạch~~, [chữ](link); phần còn lại là chữ thường. */
+const INLINE = /`([^`]*)`|\*\*(.+?)\*\*|__(.+?)__|~~(.+?)~~|!?\[([^\]]*)\]\(([^)\s]*)[^)]*\)/g
+
+function parseCell(raw: string): Cell {
+  const source = raw.replace(/<br\s*\/?>/gi, ' ')
+  const spans: Span[] = []
+  let last = 0
+  for (const m of source.matchAll(INLINE)) {
+    const at = m.index ?? 0
+    if (at > last) spans.push({ text: source.slice(last, at) })
+    if (m[1] !== undefined) spans.push({ text: m[1], code: true })
+    else if (m[2] !== undefined) spans.push({ text: m[2], bold: true })
+    else if (m[3] !== undefined) spans.push({ text: m[3], bold: true })
+    else if (m[4] !== undefined) spans.push({ text: m[4], strike: true })
+    else spans.push({ text: m[5] ?? '', link: m[6] ?? '' })
+    last = at + m[0].length
+  }
+  if (last < source.length) spans.push({ text: source.slice(last) })
+  const plain = spans.map(s => s.text).join('')
+  return { raw, plain, spans }
 }
 
 function splitSegments(text: string): Segment[] {
@@ -185,14 +268,14 @@ function splitSegments(text: string): Segment[] {
       continue
     }
     flush()
-    const header = splitRow(line).map(plain)
+    const header = splitRow(line).map(parseCell)
     const aligns = splitRow(next).map(alignOf)
-    const rows: string[][] = []
+    const rows: Cell[][] = []
     let j = i + 2
     while (j < lines.length) {
       const rowLine = lines[j] ?? ''
       if (!rowLine.includes('|') || rowLine.trim() === '') break
-      const cells = splitRow(rowLine).map(plain)
+      const cells = splitRow(rowLine).map(parseCell)
       rows.push(cells)
       j++
     }
@@ -201,6 +284,54 @@ function splitSegments(text: string): Segment[] {
   }
   flush()
   return segments
+}
+
+// ---------- Sắp xếp dòng theo một cột ----------
+
+type Sort = { col: number; isDesc: boolean }
+
+const MULTIPLIER: Record<string, number> = { k: 1e3, m: 1e6, b: 1e9 }
+
+/** Đọc ô như một con số: "5 516", "1,263", "39.7k", "12%"; không phải số thì undefined. */
+function numericValue(text: string): number | undefined {
+  const t = text.replace(/[\s  ]/g, '')
+  const m = /^([-+]?\d[\d.,]*)([kKmMbB%]?)$/.exec(t)
+  if (m === null) return undefined
+  let digits = m[1] ?? ''
+  const suffix = (m[2] ?? '').toLowerCase()
+  const isGrouped = /^[-+]?\d{1,3}([.,]\d{3})+$/.test(digits)
+  if (isGrouped && suffix === '') digits = digits.replace(/[.,]/g, '')
+  else digits = digits.replace(',', '.')
+  const value = Number(digits)
+  if (Number.isNaN(value)) return undefined
+  return value * (MULTIPLIER[suffix] ?? 1)
+}
+
+function compareCells(a: string, b: string): number {
+  const isEmptyA = a.trim() === ''
+  const isEmptyB = b.trim() === ''
+  if (isEmptyA || isEmptyB) return isEmptyA === isEmptyB ? 0 : isEmptyA ? 1 : -1
+  const na = numericValue(a)
+  const nb = numericValue(b)
+  if (na !== undefined && nb !== undefined) return na - nb
+  if (na !== undefined) return -1
+  if (nb !== undefined) return 1
+  return a.localeCompare(b, 'vi', { numeric: true, sensitivity: 'base' })
+}
+
+function sortTable(table: Table, sort: Sort | undefined): Table {
+  if (sort === undefined) return table
+  const sign = sort.isDesc ? -1 : 1
+  const key = (row: Cell[]) => row[sort.col]?.plain ?? ''
+  const rows = [...table.rows].sort((a, b) => sign * compareCells(key(a), key(b)))
+  return { ...table, rows }
+}
+
+/** Bấm một cột: chưa sắp → tăng dần → giảm dần → bỏ sắp xếp. */
+function nextSort(current: Sort | undefined, col: number): Sort | undefined {
+  if (current === undefined || current.col !== col) return { col, isDesc: false }
+  if (!current.isDesc) return { col, isDesc: true }
+  return undefined
 }
 
 // ---------- Vẽ bảng thành các dòng chữ cùng độ rộng ----------
@@ -226,118 +357,207 @@ function textWidth(s: string): number {
   return w
 }
 
-function wrap(text: string, width: number): string[] {
-  const lines: string[] = []
-  let line = ''
+/** Một mẩu chữ trên một dòng của lưới; `style` là định dạng nó mang theo từ ô. */
+type Run = { text: string; style?: Span }
+type Word = Run[]
+
+function runsWidth(runs: Run[]): number {
+  return runs.reduce((w, r) => w + textWidth(r.text), 0)
+}
+
+/** Tách các đoạn của ô thành từ; một từ có thể gồm nhiều mẩu khác định dạng (vd. **a**b). */
+function cellWords(spans: Span[]): Word[] {
+  const words: Word[] = []
+  let word: Word = []
+  for (const span of spans) {
+    const style = span.bold || span.code || span.strike || span.link !== undefined ? span : undefined
+    for (const piece of span.text.split(/(\s+)/)) {
+      if (piece === '') continue
+      if (/^\s+$/.test(piece)) {
+        if (word.length > 0) words.push(word)
+        word = []
+        continue
+      }
+      word.push({ text: piece, style })
+    }
+  }
+  if (word.length > 0) words.push(word)
+  return words
+}
+
+/** Bẻ dòng theo từ; từ nào dài hơn ô thì cắt theo ký tự. */
+function wrapRuns(spans: Span[], width: number): Run[][] {
+  const lines: Run[][] = []
+  let line: Run[] = []
   let lineW = 0
-  for (const word of text.split(/\s+/).filter(Boolean)) {
-    const wordW = textWidth(word)
-    const needed = line === '' ? wordW : lineW + 1 + wordW
+  const push = (run: Run) => {
+    const prev = line[line.length - 1]
+    if (prev !== undefined && prev.style === run.style) prev.text += run.text
+    else line.push({ ...run })
+  }
+
+  for (const word of cellWords(spans)) {
+    const wordW = runsWidth(word)
+    const needed = line.length === 0 ? wordW : lineW + 1 + wordW
     if (needed <= width) {
-      line = line === '' ? word : `${line} ${word}`
+      if (line.length > 0) push({ text: ' ' })
+      word.forEach(push)
       lineW = needed
       continue
     }
-    if (line !== '') {
+    if (line.length > 0) {
       lines.push(line)
-      line = ''
+      line = []
       lineW = 0
     }
     if (wordW <= width) {
-      line = word
+      word.forEach(push)
       lineW = wordW
       continue
     }
-    for (const ch of word) {
-      const chW = charWidth(ch.codePointAt(0) ?? 0)
-      if (lineW + chW > width && line !== '') {
-        lines.push(line)
-        line = ''
-        lineW = 0
+    for (const run of word) {
+      for (const ch of run.text) {
+        const chW = charWidth(ch.codePointAt(0) ?? 0)
+        if (lineW + chW > width && line.length > 0) {
+          lines.push(line)
+          line = []
+          lineW = 0
+        }
+        push({ text: ch, style: run.style })
+        lineW += chW
       }
-      line += ch
-      lineW += chW
     }
   }
-  if (line !== '' || lines.length === 0) lines.push(line)
+  if (line.length > 0 || lines.length === 0) lines.push(line)
   return lines
 }
 
-function pad(text: string, width: number, align: Align): string {
-  const gap = Math.max(0, width - textWidth(text))
-  if (align === 'right') return ' '.repeat(gap) + text
+function padRuns(runs: Run[], width: number, align: Align): Run[] {
+  const gap = Math.max(0, width - runsWidth(runs))
+  if (gap === 0) return runs
+  if (align === 'right') return [{ text: ' '.repeat(gap) }, ...runs]
   if (align === 'center') {
     const left = Math.floor(gap / 2)
-    return ' '.repeat(left) + text + ' '.repeat(gap - left)
+    return [{ text: ' '.repeat(left) }, ...runs, { text: ' '.repeat(gap - left) }]
   }
-  return text + ' '.repeat(gap)
+  return [...runs, { text: ' '.repeat(gap) }]
 }
 
-type GridLine = { text: string; isHeader: boolean }
+/** Một dòng màn hình của lưới. `isStriped`: dòng dữ liệu thứ chẵn, tô nền nhạt. */
+type GridLine = { runs: Run[]; isHeader: boolean; isStriped: boolean }
 
 function gridLines(table: Table): GridLine[] {
   const ncols = Math.max(table.header.length, ...table.rows.map(r => r.length))
   const all = [table.header, ...table.rows]
   const widths: number[] = []
   for (let c = 0; c < ncols; c++) {
-    const natural = Math.max(1, ...all.map(r => textWidth(r[c] ?? '')))
+    const natural = Math.max(1, ...all.map(r => textWidth(r[c]?.plain ?? '')))
     widths.push(Math.min(natural, MAX_COL))
   }
   const aligns = Array.from({ length: ncols }, (_, c) => table.aligns[c] ?? 'left')
-  const border = (l: string, m: string, r: string, fill: string) =>
-    l + widths.map(w => fill.repeat(w + 2)).join(m) + r
+  const border = (l: string, m: string, r: string, fill: string): GridLine => ({
+    runs: [{ text: l + widths.map(w => fill.repeat(w + 2)).join(m) + r }],
+    isHeader: false,
+    isStriped: false,
+  })
 
-  const rowLines = (row: string[], isHeader: boolean): GridLine[] => {
-    const cells = widths.map((w, c) => wrap(row[c] ?? '', w))
+  const rowLines = (row: Cell[], isHeader: boolean, isStriped: boolean): GridLine[] => {
+    const cells = widths.map((w, c) => wrapRuns((row[c] ?? EMPTY_CELL).spans, w))
     const height = Math.max(...cells.map(c => c.length))
     const out: GridLine[] = []
     for (let k = 0; k < height; k++) {
-      const parts = cells.map((lines, c) => pad(lines[k] ?? '', widths[c] ?? 1, aligns[c] ?? 'left'))
-      out.push({ text: `│ ${parts.join(' │ ')} │`, isHeader })
+      const runs: Run[] = [{ text: '│ ' }]
+      cells.forEach((lines, c) => {
+        if (c > 0) runs.push({ text: ' │ ' })
+        runs.push(...padRuns(lines[k] ?? [], widths[c] ?? 1, aligns[c] ?? 'left'))
+      })
+      runs.push({ text: ' │' })
+      out.push({ runs, isHeader, isStriped })
     }
     return out
   }
 
-  const anyWrapped = table.rows.some(r => r.some((cell, c) => textWidth(cell) > (widths[c] ?? 0)))
-  const lines: GridLine[] = [{ text: border('┌', '┬', '┐', '─'), isHeader: false }]
-  lines.push(...rowLines(table.header, true))
-  lines.push({ text: border('╞', '╪', '╡', '═'), isHeader: false })
+  const anyWrapped = table.rows.some(r => r.some((cell, c) => textWidth(cell.plain) > (widths[c] ?? 0)))
+  const lines: GridLine[] = [border('┌', '┬', '┐', '─')]
+  lines.push(...rowLines(table.header, true, false))
+  lines.push(border('╞', '╪', '╡', '═'))
   table.rows.forEach((row, i) => {
-    if (anyWrapped && i > 0) lines.push({ text: border('├', '┼', '┤', '─'), isHeader: false })
-    lines.push(...rowLines(row, false))
+    if (anyWrapped && i > 0) lines.push(border('├', '┼', '┤', '─'))
+    lines.push(...rowLines(row, false, i % 2 === 1))
   })
-  lines.push({ text: border('└', '┴', '┘', '─'), isHeader: false })
+  lines.push(border('└', '┴', '┘', '─'))
   return lines
 }
 
-/** Bảng dưới dạng Markdown, để vẽ kiểu câu trả lời của Claude. */
+/** Chữ thuần của một dòng lưới (để đo, để test tìm). */
+function lineText(line: GridLine): string {
+  return line.runs.map(r => r.text).join('')
+}
+
+/** Các link trong bảng, để liệt kê bấm được dưới lưới (trong lưới chữ đơn cách không bấm được). */
+function tableLinks(table: Table): string {
+  const seen = new Set<string>()
+  const links: string[] = []
+  for (const cell of [...table.header, ...table.rows.flat()]) {
+    for (const span of cell.spans) {
+      if (span.link === undefined || span.link === '' || seen.has(span.link)) continue
+      seen.add(span.link)
+      const label = span.text.replace(/[[\]]/g, '') || span.link
+      links.push(`[${label}](${span.link})`)
+    }
+  }
+  return links.join(' · ')
+}
+
+/** Bảng dưới dạng Markdown gốc, để vẽ kiểu câu trả lời của Claude. */
 function tableMarkdown(table: Table): string {
-  const esc = (s: string) => s.replace(/\|/g, '\\|')
+  const esc = (cell: Cell) => cell.raw.replace(/\|/g, '\\|')
   const sep = table.header.map((_, c) => {
     const a = table.aligns[c] ?? 'left'
     if (a === 'center') return ':---:'
     if (a === 'right') return '---:'
     return '---'
   })
-  const rows = [table.header, sep, ...table.rows].map(r => `| ${r.map(esc).join(' | ')} |`)
-  return rows.join('\n')
+  const head = `| ${table.header.map(esc).join(' | ')} |`
+  const rows = table.rows.map(r => `| ${r.map(esc).join(' | ')} |`)
+  return [head, `| ${sep.join(' | ')} |`, ...rows].join('\n')
 }
 
-/** Một bảng dạng lưới: chú thích ở trên, các dòng chữ đơn cách trượt ngang cùng nhau. */
-function gridBlock(ui: ElementTable, table: Table, caption: string) {
-  const { Box, Text } = ui
+/** Nền nhạt cho dòng chẵn: xám trong suốt, hợp cả nền sáng lẫn tối. */
+const STRIPE = '#8080801f'
+
+/** Một bảng dạng lưới: chú thích, (nút sắp xếp), các dòng chữ đơn cách trượt ngang cùng nhau, link bên dưới. */
+function gridBlock(ui: ElementTable, table: Table, caption: string, controls?: RenderChildren) {
+  const { Box, Text, Markdown } = ui
+  const links = tableLinks(table)
   return (
     <Box flexDirection="column">
       <Text dimColor size="caption">
         {caption}
       </Text>
+      {controls}
       <Box flexDirection="column" overflowX="scroll">
         {gridLines(table).map(line => (
-          <Text mono bold={line.isHeader}>
-            {line.text}
+          <Text mono bold={line.isHeader} backgroundColor={line.isStriped ? STRIPE : undefined}>
+            {line.runs.map(run => {
+              const s = run.style
+              if (s === undefined) return run.text
+              const isLink = s.link !== undefined
+              return (
+                <Text
+                  bold={s.bold}
+                  strikethrough={s.strike}
+                  underline={isLink}
+                  color={s.code ? 'claude' : isLink ? 'suggestion' : undefined}
+                >
+                  {run.text}
+                </Text>
+              )
+            })}
           </Text>
         ))}
       </Box>
+      {links !== '' && <Markdown dimColor text={`Liên kết trong bảng: ${links}`} />}
     </Box>
   )
 }
@@ -361,7 +581,11 @@ async function onDocWritten($: Dollar, path: string, root: string, shouldOpen: b
   const tables = splitSegments(text).filter(seg => seg.kind === 'table').length
   await recordDoc($, path, root, tables)
   await update($, openPath, () => path)
-  if (shouldOpen) void showPane($)
+  // Pane bật lên trước mắt người dùng: coi như đã xem.
+  if (shouldOpen) {
+    void showPane($)
+    await markSeen($, path)
+  }
   $.ui.invalidate('ui.render')
 }
 
@@ -378,6 +602,7 @@ export const register: Register = on => {
       name: 'md',
       description: 'Mở pane xem tài liệu Markdown (thêm đường dẫn để mở thẳng một file)',
     })
+    await ensureSeen($).catch(() => undefined)
 
     // Tài liệu đổi ở session khác hay ngoài Claude: kiểm tra định kỳ rồi vẽ lại.
     $.clock.every(POLL_MS, async () => {
@@ -402,7 +627,7 @@ export const register: Register = on => {
     if (arg !== '') {
       const isThere = await $.fs.exists(arg)
       if (!isThere) return { text: `Không tìm thấy file: ${arg}` }
-      await update($, openPath, () => arg)
+      await openDoc($, arg)
     }
     await showPane($)
     return { text: arg === '' ? 'Đã mở pane MD Preview.' : `Đang xem ${baseName(arg)} trong pane MD Preview.` }
@@ -443,6 +668,9 @@ export const register: Register = on => {
       const matched = needle === '' ? docs : docs.filter(d => d.source.toLowerCase().includes(needle))
       const shown = matched.slice(0, MAX_LIST)
       const isGridInChat = await read($, isChatGrid)
+      await read($, listTick) // vẽ lại khi index.tsv hay seen.tsv đổi
+      const seen = await loadSeen($)
+      const unreadCount = docs.filter(d => isUnread(d, seen)).length
 
       return (
         <Box flexDirection="column" gap="sm">
@@ -467,19 +695,26 @@ export const register: Register = on => {
               }
             />
           ) : (
-            <Text dimColor size="caption">
-              {matched.length === docs.length
-                ? `${docs.length} tài liệu · mới nhất ở trên`
-                : `${matched.length}/${docs.length} tài liệu khớp “${q.trim()}”`}
-              {matched.length > shown.length ? ` · đang hiện ${shown.length}` : ''}
-            </Text>
+            <Box flexDirection="row" gap="sm" alignItems="center">
+              <Text dimColor size="caption">
+                {matched.length === docs.length
+                  ? `${docs.length} tài liệu · mới nhất ở trên`
+                  : `${matched.length}/${docs.length} tài liệu khớp “${q.trim()}”`}
+                {matched.length > shown.length ? ` · đang hiện ${shown.length}` : ''}
+                {unreadCount > 0 ? ` · ${unreadCount} chưa xem` : ''}
+              </Text>
+              {unreadCount > 0 && (
+                <Button key="mark-all-seen" plain dimColor label="Đánh dấu đã xem hết" onPress={() => markAllSeen($)} />
+              )}
+            </Box>
           )}
           <Box flexDirection="column" gap="xs">
             {shown.map(doc => {
               const folder = folderInProject(doc)
               const where = folder === '' ? projectName(doc) : `${projectName(doc)} › ${folder}`
               return (
-                <Button key={`doc:${doc.source}`} plain onPress={() => update($, openPath, () => doc.source)}>
+                <Button key={`doc:${doc.source}`} plain onPress={() => openDoc($, doc.source)}>
+                  {isUnread(doc, seen) ? <Text color="claude">● </Text> : ''}
                   {baseName(doc.source)}{' '}
                   <Text dimColor>
                     {where} · {relativeTime(now, doc.updated)}
@@ -498,6 +733,7 @@ export const register: Register = on => {
     const raw = isChat ? await read($, chatText) : await $.fs.read(path).catch(() => undefined)
     const style: TableStyle = await read($, tableStyle)
     const isGrid = style === 'grid'
+    const sortMap: Record<string, Sort> = await read($, sorts)
 
     const toolbar = (
       <Box flexDirection="row" gap="sm" alignItems="center">
@@ -543,7 +779,39 @@ export const register: Register = on => {
           if (seg.kind === 'text') return <Markdown text={seg.text} />
           tableNo += 1
           const caption = tableCaption(seg.table, tableNo, tableCount)
-          if (isGrid) return gridBlock(ui, seg.table, `${caption} · kéo ngang để xem hết`)
+          if (isGrid) {
+            const sortKey = `${path}#${tableNo}`
+            const sort = sortMap[sortKey]
+            const sorted = sortTable(seg.table, sort)
+            const controls = (
+              <Box flexDirection="row" flexWrap="wrap" columnGap="sm" alignItems="center">
+                <Text dimColor size="caption">
+                  Sắp xếp:
+                </Text>
+                {seg.table.header.map((cell, col) => {
+                  const arrow = sort?.col === col ? (sort.isDesc ? ' ▼' : ' ▲') : ''
+                  return (
+                    <Button
+                      key={`sort:${tableNo}:${col}`}
+                      plain
+                      dimColor={sort?.col !== col}
+                      label={`${cell.plain || `Cột ${col + 1}`}${arrow}`}
+                      onPress={() =>
+                        update($, sorts, map => {
+                          const nextMap: Record<string, Sort> = { ...map }
+                          const chosen = nextSort(nextMap[sortKey], col)
+                          if (chosen === undefined) delete nextMap[sortKey]
+                          else nextMap[sortKey] = chosen
+                          return nextMap
+                        })
+                      }
+                    />
+                  )
+                })}
+              </Box>
+            )
+            return gridBlock(ui, sorted, `${caption} · kéo ngang để xem hết`, controls)
+          }
           return (
             <Box flexDirection="column">
               <Text dimColor size="caption">

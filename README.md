@@ -7,8 +7,13 @@ Plugin cho Claude Code giúp đọc Markdown dễ hơn, nhất là bảng:
   gốc của Claude. Áp dụng trên app desktop và mobile; terminal và VS Code giữ cách vẽ của Claude.
 - **Pane MD Preview** (lệnh `/md`): danh sách mọi file `.md` Claude đã ghi, ở mọi session, mới nhất ở trên, có ô tìm
   kiếm. Bấm một file để xem: chữ vẽ như câu trả lời của Claude, bảng vẽ thành lưới cuộn ngang.
+- **Bảng trong pane**: bấm tên cột để sắp xếp (tăng → giảm → bỏ), cột số như `5 516`, `1,263`, `39.7k` sắp theo
+  giá trị. Ô giữ chữ đậm, `code`, gạch ngang; link trong bảng được liệt kê bấm được ngay dưới bảng. Dòng chẵn tô
+  nền nhạt cho dễ dò theo hàng.
 - **Tự mở**: khi Claude vừa ghi hoặc sửa một file `.md`, pane hiện ngay file đó. File trong thư mục `.claude`
   (memory, plan nội bộ) được bỏ qua.
+- **Chấm "chưa xem"**: file Claude sửa mà bạn chưa mở có dấu ● trong danh sách; nút "Đánh dấu đã xem hết" xoá mọi
+  chấm.
 
 `/md đường-dẫn\tới\file.md` mở thẳng một file bất kỳ.
 

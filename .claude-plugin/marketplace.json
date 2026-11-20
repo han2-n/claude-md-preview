@@ -1,0 +1,5 @@
+{
+  "name": "md-preview",
+  "owner": { "name": "md-preview" },
+  "plugins": [{ "name": "md-preview", "source": "./" }]
+}

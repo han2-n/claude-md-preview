@@ -1,0 +1,7 @@
+{
+  "name": "md-preview",
+  "version": "0.3.0",
+  "description": "Xem file Markdown trong pane /md, tự mở file .md Claude vừa ghi; bảng (trong file và trong câu trả lời của Claude) vẽ thành lưới cuộn ngang",
+  "types": "./types/index.d.ts",
+  "license": "MIT"
+}
